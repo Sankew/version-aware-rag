@@ -1,124 +1,154 @@
 # Version-aware RAG
 
-[![Checks](https://github.com/Sankew/version-aware-rag/actions/workflows/checks.yml/badge.svg)](https://github.com/Sankew/version-aware-rag/actions/workflows/checks.yml)
+[![Checks](https://github.com/Sankew/version-aware-rag/actions/workflows/checks.yml/badge.svg?branch=p1-version-aware)](https://github.com/Sankew/version-aware-rag/actions?query=branch%3Ap1-version-aware)
 
-Company documents change, and the old versions don't go away. A plain RAG system over a document store answers "how many vacation days do I get?" with whatever version it retrieves. Deleting old versions fixes that and breaks "how many did we get in 2024?". This project keeps every version, retrieves by the date a question is about, and says which version an answer came from. It also flags pages that still contradict current policy.
+Company policies change. An answer about today's vacation allowance and an answer about the allowance in 2024 may need different versions of the same handbook. This project keeps document versions, retrieves the passages in effect on the date a question asks about, and returns their version and effective dates with the answer.
 
-It is evaluated on a fictional company, Brackwater Robotics. Public corpora are already memorised by the model, which would hide whether retrieval found the right version.
+It also produces section-by-section change logs and checks for contradictions between documents that are still in effect. The corpus belongs to a fictional company, Brackwater Robotics, which reduces the chance of answering from prior knowledge. It does not prevent a model from guessing.
+
+**Status:** the implementation, data validation and automated tests pass CI. Evaluation with real embeddings, NLI and generation models is pending. The deterministic substitutes used in CI check the pipeline; they do not establish answer quality or model performance.
+
+## How it works
 
 ```mermaid
 flowchart LR
-    Q[Question] --> D[As-of date<br/>from the question, else today]
-    Q --> E[bge-small<br/>query embedding]
-    D --> F[Versions in effect<br/>on that date]
-    E --> S[Exact cosine search<br/>pgvector, top 5]
+    Q[Question] --> D[Parse the as-of date]
+    Q --> E[Embed the question]
+    D --> F[Filter versions by effective dates]
+    E --> S[Exact cosine search in pgvector]
     F --> S
-    S --> G[Configured generation model<br/>cites document:section,<br/>names the version]
-    G --> A[Answer]
+    S --> C[Top 5 passages with version metadata]
+    C --> G[Generate an answer with citations]
+    G --> A[Answer and sources]
 ```
 
-## What it does
+- **Version storage:** each version has an effective date range. Adding a later version closes the previous range and preserves its contents. Versions must be inserted in order. The `index` command is a full rebuild from the corpus manifest and resets the project's tables.
+- **Date selection:** the parser recognises explicit dates, months and years such as `20 February 2026`, `June 2025` and `in 2024`. A month or year means its last day, capped at the current date used by the caller. Without a match, it uses that date. Evaluation freezes this clock at **1 October 2026**; the API uses the actual day.
+- **Retrieval:** `aware` filters by effective dates before searching. This handles cases where a document was uploaded before it took effect. The API also accepts an explicit `as_of` override.
+- **Citations:** retrieved passages carry the document, section, version and effective dates. Citation labels that do not belong to a retrieved passage are removed from the answer and counted. This checks citation membership, not whether a passage supports every claim.
+- **Change logs:** sections are aligned by heading, then compared with `difflib` to show additions, removals and edits.
+- **Contradiction detection:** similar chunks from different documents in effect on the evaluation date become candidates. The three most similar sentence pairs are scored in both directions by `cross-encoder/nli-deberta-v3-base`. Titles and section headings preserve context; document stamps such as edit dates are excluded. The report separates candidate recall, NLI recall among surfaced pairs, and end-to-end recall.
 
-- **Ingest never deletes.** Each document version is a row in `doc_versions` with its effective date range. Adding a version closes the previous one's range. Versions must arrive in order; v2 after v3 is rejected.
-- **As-of retrieval.** `20 February 2026`, `June 2025` and `in 2024` in a question set the date (a month or a year means its last day). With no date, the date is today. Only 19xx and 20xx count as years, so "for 1200 charge cycles" stays a number. Retrieval filters on the effective date range, never on a `status` flag. Handbook v3 was uploaded on 10 February 2026 but takes effect on 1 March, so a status flag would give the wrong answer for anything asked in between.
-- **Attribution.** Excerpts carry their version and effective dates, and answers name the version they used. Citations that don't match a retrieved excerpt are removed from the answer text and counted. This checks citation membership; it does not prove that a cited fact is supported.
-- **Change log.** `uv run python versioning.py changelog employee-handbook` aligns sections by heading and diffs them with `difflib`.
-- **Contradictions.**
-  - Chunks from different current documents with cosine similarity above a threshold are candidates.
-  - For each candidate, the 3 most similar sentence pairs are checked. Every sentence is prefixed with its document title and section, so "contractors" or "full-time employees" survives the split. Document stamps (version lines, owners, "last updated") are dropped first, since they differ between any two pages.
-  - `cross-encoder/nli-deberta-v3-base` scores each pair in both directions, and the higher score counts.
-  - Each stage is scored on its own: candidate recall, then NLI recall on the pairs the filter surfaced, then end to end.
+## Setup
+
+Use Python 3.12, uv and Docker. Run commands from the repository root.
+
+```bash
+uv sync --locked --group models --group dev
+docker compose up -d --wait db
+docker compose exec db createdb -U postgres version_rag
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/version_rag"
+```
+
+Create `version_rag` once. The Compose service binds to local port 5432. If another project already runs pgvector on that port, reuse that server and create this project's separate database there.
+
+Real answer generation and judging use the Anthropic SDK. Set an API key and actual model IDs that support the request's effort settings and structured JSON output. Replace the placeholders before running the evaluation:
+
+```bash
+export ANTHROPIC_API_KEY="your-api-key"
+export GENERATOR_MODEL="your-generation-model-id"
+export JUDGE_MODEL="your-judging-model-id"
+uv run --locked --group models python -m rag.pipeline index
+```
+
+Local embedding and NLI models are downloaded on first use. Before reporting cost, set `GENERATOR_INPUT_USD_PER_MILLION` and `GENERATOR_OUTPUT_USD_PER_MILLION` to numeric rates for the chosen generation model. Their defaults, 0.10 and 0.50, are illustrative.
+
+### Run the API and change log
+
+```bash
+uv run --locked --group models uvicorn rag.api:app
+```
+
+In another terminal, with the same environment configured:
+
+```bash
+curl -X POST http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"How many vacation days were available in 2024?","mode":"aware"}'
+uv run --locked python versioning.py changelog employee-handbook
+```
+
+`POST /ask` accepts `question`, `mode` and an optional ISO date in `as_of`. The response includes the answer, citations, source versions and the date applied to retrieval. That date is null for `all` and `current`, which ignore it. Model failures return 502; an unavailable database or incompatible index returns 503.
 
 ## Evaluation
 
-The comparison runs the same questions through:
+The same questions run through five retrieval modes:
 
-| Mode | Retrieves from | Fails on |
+| Mode | Documents searched | Purpose |
 |---|---|---|
-| `all` | every version | stale versions polluting current answers |
-| `current` | the latest version of each document (the "delete old versions" approach) | historical questions |
-| `aware` | versions in effect on the question's as-of date | misread dates |
-| `labelled` | as `aware`, on the labelled as-of date instead of the parsed one (eval only) | — |
-| `lexical` | Postgres full-text search, as-of versions | a baseline for wording overlap |
+| `all` | Every version | Measure interference from old versions |
+| `current` | The latest stored version of each document | Compare against keeping only the latest version |
+| `aware` | Versions in effect on the parsed date | Evaluate date parsing and version filtering together |
+| `labelled` | Versions in effect on the reference date | Isolate retrieval from date-parsing errors |
+| `lexical` | Postgres full-text search over versions in effect on the parsed date | Compare with a lexical baseline |
 
-`aware` minus `labelled` is what date extraction costs; `labelled` minus `current` is what filtering buys.
+Compare `aware` with `labelled` to assess the effect of date parsing. Compare `labelled` with `current` to assess date-based version selection without parsing errors.
 
-**Data**
+### Data
 
-- **Corpus:** 62 files: 47 documents, 14 of them with two or three versions (15 superseded versions in all), in Markdown, HTML and PDF. It contains:
-  - stale FAQ, wiki and onboarding pages that still state old policy;
-  - a duplicate page;
-  - tables;
-  - upload dates that differ from effective dates.
-- `eval/step0.jsonl`: 97 baseline questions (single-source, multi-source and unanswerable).
-- `eval/p1.jsonl`: 67 version questions:
-  - 33 whose answer changed between versions, asked about today. 3 of them contain numbers or month words that aren't dates ("for 1200 charge cycles", "May employees…"), and one is about a handbook section that was removed;
-  - 24 asked about a past date, including the effective-date boundary and both upload-date traps;
-  - 6 whose answer never changed;
-  - 4 with no answer on their date: two before any document existed, one never documented, and one about a stipend that only appears after the date asked about.
-- `eval/contradictions.jsonl`: 12 planted contradictions and 9 hard negatives (same topic, different scope, or the same facts stated twice).
-- `eval/human/`: hand-written questions in the same format, scored as their own slice. Empty so far.
+The corpus contains **62 files covering 47 documents**, including 14 documents with multiple versions and 15 superseded versions. Markdown, HTML and PDF sources include tables, duplicate content, stale policy summaries and upload dates that differ from effective dates.
 
-`uv run python -m eval.validate` checks every question's sources against the manifest. It also checks that every number in a reference answer appears in that question's source documents.
+| Evaluation file | Contents |
+|---|---|
+| `eval/step0.jsonl` | 97 baseline questions about one source, multiple sources or undocumented facts |
+| `eval/p1.jsonl` | 67 version questions: 33 about changed answers at the evaluation date, 24 historical, 6 unchanged and 4 unanswerable |
+| `eval/contradictions.jsonl` | 12 planted contradictions and 9 consistent pairs with similar wording or different scope |
+| [`eval/human/`](eval/human/README.md) | Optional independently written questions; none are included yet |
 
-**Metrics**
-
-- **Judge correctness.** Configured judging model compares each answer with the reference answer.
-- **Retrieval hit, top-1 and all-source recall.** Counted on (document, version), not on document alone.
-- **Stale fraction.** The share of retrieved chunks from versions that weren't in effect on the question's date.
-- **Date extraction accuracy**, on dated and undated questions, with the misses listed.
-- **Version attribution rate** and unsupported citations.
-- **Generation cost**, from the token counts the API returns.
-
-Proportions come with k/n and a 95% Wilson interval. Differences between modes are paired, with a 95% interval from resampling whole question groups (paraphrases of one fact move together). At 25 to 65 questions per slice, a 10-point gap can be noise.
-
-**Checking the judge.** `eval.score labelsheet` samples 50 answers from a run without the judge's verdict. After they are labelled by hand, `eval.score agreement` reports agreement and Cohen's kappa per run. No judge number should be trusted before that.
-
-## Results
-
-**Pending.** Real numbers need `bge-small-en-v1.5`, the NLI model and an Anthropic API key, and haven't been run yet. CI runs the same pipeline with a hashing embedder and a number-mismatch stand-in for NLI. Those runs prove the plumbing; they are not results, and `results/*_fake*` is gitignored.
-
-Two things are already visible from building it:
-
-- **Full-text search finds the right version for 84 of 85 answerable baseline questions and every P1 question on the fake run.** The documents and questions were written by the same model and share wording. Hand-written questions in `eval/human/` (same format, `"author": "human"`) are the fix.
-- **Date extraction can misfire.** It reads "Which office opened **in 2025**?" as a question about 2025, and hides the company-history page, which took effect in January 2026. Regex can't tell an event date from an as-of date.
-
-## Run
-
-Python 3.12, [uv](https://docs.astral.sh/uv/), Docker:
+The validator checks the manifest, source references and whether numbers in reference answers appear in the listed source documents. These checks do not establish that every reference answer is correct.
 
 ```bash
-docker compose up -d db
-uv sync --group models --group dev
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/rag ANTHROPIC_API_KEY=...
-export GENERATOR_MODEL="<generation-model-id>" JUDGE_MODEL="<judging-model-id>"
-export GENERATOR_INPUT_USD_PER_MILLION="<input-rate>" GENERATOR_OUTPUT_USD_PER_MILLION="<output-rate>"
-uv run python -m rag.pipeline index
-uv run python -m eval.score qa --set p1 --modes all current aware labelled
-uv run python -m eval.score qa --set step0 --modes aware lexical
-uv run python -m eval.score contradictions
-uv run python -m eval.score labelsheet results/p1_aware_k5.csv   # then label it and run `eval.score agreement`
-uv run uvicorn rag.api:app        # POST /ask {"question": "...", "mode": "aware"}
+uv run --locked python -m eval.validate
+uv run --locked --group models python -m eval.score qa --set p1 --modes all current aware labelled
+uv run --locked --group models python -m eval.score qa --set step0 --modes aware lexical
+uv run --locked --group models python -m eval.score contradictions
 ```
 
-Tests rebuild their tables, so they use a separate database:
+### Metrics and review
+
+Reports include judged answer correctness, retrieval hit rate, top-1 and all-source recall, stale-chunk fraction, date extraction accuracy, version attribution, unsupported citation counts and estimated generation cost. Retrieval is scored on **document and version together**.
+
+Proportions include counts and 95% Wilson intervals. Differences between modes use paired bootstrap intervals that resample whole question groups, keeping related paraphrases together. Wilson intervals assume independent questions, so they can understate uncertainty when questions share a fact.
+
+Check the judge by sampling answers without its verdict:
 
 ```bash
-docker compose exec db createdb -U postgres rag_test
-TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/rag_test uv run pytest -q
+uv run --locked python -m eval.score labelsheet results/p1_aware_k5.csv
+# Fill human_correct with 1 or 0 in the generated sheet, then:
+uv run --locked python -m eval.score agreement results/labels/p1_aware_k5_sheet.csv
 ```
 
-The index records which embedder built it and a hash of the corpus and chunking code. Eval runs rebuild it when the corpus or code changes, but won't replace an index built with a different embedder (the API's, say) unless given `--reindex`. The API returns 503 if the index came from a different embedder. LLM calls are cached in `.cache/llm/` by a hash of the full request, so reruns cost nothing. Only complete responses are cached. A refused or truncated answer is scored as wrong. A failed judge call or a transient API error (timeout, rate limit, overload) becomes an error row, left out of the metrics and retried on the next run. A bad key or model name stops the run. Without models or a key: `uv run python -m eval.score qa --set p1 --retrieval-only --fake`.
+The sample contains up to 50 answers. Agreement and Cohen's kappa compare the completed sheet with the judge's verdicts. Sampling refuses to overwrite a sheet that already has review marks.
 
-Cost estimates use configurable input and output token rates; the defaults (0.10 and 0.50 per million) are illustrative. Set the selected model's current rates before reporting costs.
+QA runs write per-mode CSV files and a summary JSON file in `results/`. Contradiction runs write a report and the flagged pairs. Fake runs have `_fake` in their filenames and are excluded from version control.
 
-**API.** `as_of` in the response is the date retrieval filtered on, or null for `all` and `current`, which ignore it. Questions without a date use the real date, not the eval clock. Model failures return 502, an unreachable database 503.
+## Checks without model calls
 
-## Limitations
+These commands require pgvector but no API key or model downloads. Use a separate database because the first run builds an index with the hashing embedder:
 
-- The corpus, questions and reference answers are synthetic fixtures; answers are graded automatically. This can reinforce shared errors. Agreement between the judge and about 50 hand-labelled answers should be reported before any number is trusted.
-- Exact scan, no ANN index. Past ~100k chunks, add HNSW with `hnsw.iterative_scan` so filtered queries still return k rows.
-- NLI is expected to be weak on numeric conflicts ("20 days" vs "25 days"). Scoring it on the planted numeric pairs is part of the point.
-- The as-of date comes from a regular expression, not a model. It handles explicit dates and misreads event dates (see above), and a year-like amount after "for" or "by" ("for 2000 dollars") reads as a year.
-- Wilson intervals treat questions as independent. Paraphrases of one fact aren't, so per-slice intervals are too narrow; the paired deltas resample groups and don't have this problem.
-- The API and models run natively; Docker runs only Postgres.
+```bash
+uv sync --locked --group dev
+docker compose exec db createdb -U postgres version_rag_smoke
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/version_rag_smoke" \
+  uv run --locked python -m eval.score qa --set p1 --modes all current aware lexical --retrieval-only --fake
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/version_rag_smoke" \
+  uv run --locked python -m eval.score contradictions --fake --threshold 0.5
+```
+
+For the full test suite, create a dedicated test database once. Database tests rebuild its tables:
+
+```bash
+docker compose exec db createdb -U postgres version_rag_test
+TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/version_rag_test" \
+  uv run --locked --group dev pytest -q
+```
+
+## Caching and limitations
+
+- Evaluation rebuilds the index when the corpus or chunking fingerprint changes. Switching embedders requires a separate database or `--reindex`; the explicit `index` command always rebuilds.
+- Complete model responses are cached in `.cache/llm/` by the full request. Matching requests reuse responses; new or failed requests can still incur charges. Reported cost estimates retain the original token counts and exclude judging, so they are not the bill for a rerun.
+- Refused or truncated answers are scored as wrong. Failed judge calls and transient API errors become error rows, excluded from metrics and retried on the next run. Invalid credentials or model IDs stop the run.
+- The corpus, questions and reference answers are synthetic. Shared wording can favour lexical retrieval, and shared mistakes can affect judging. Independently written questions and manual review are still needed.
+- The date parser cannot reliably distinguish an event date from the date a policy should be evaluated on. For example, a question about an office opened in 2025 may incorrectly exclude a history page published in 2026.
+- Exact vector search has no ANN index. Performance at larger document counts has not been measured.
+- NLI may miss numeric disagreements or misread scope. The planted pairs test those cases, but real-model results remain pending.
