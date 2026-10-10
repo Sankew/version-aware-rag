@@ -108,7 +108,7 @@ docker compose exec db createdb -U postgres rag_test
 TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/rag_test uv run pytest -q
 ```
 
-The index records which embedder built it and a hash of the corpus and chunking code. Eval runs rebuild it when the corpus or code changes, but won't replace an index built with a different embedder (the API's, say) unless given `--reindex`. The API returns 503 if the index came from a different embedder. LLM calls are cached in `.cache/llm/` by a hash of the full request, so reruns cost nothing. Only complete responses are cached: a refusal or a response cut off at `max_tokens` is recorded as an error row and retried on the next run. Without models or a key: `uv run python -m eval.score qa --set p1 --retrieval-only --fake`.
+The index records which embedder built it and a hash of the corpus and chunking code. Eval runs rebuild it when the corpus or code changes, but won't replace an index built with a different embedder (the API's, say) unless given `--reindex`. The API returns 503 if the index came from a different embedder. LLM calls are cached in `.cache/llm/` by a hash of the full request, so reruns cost nothing. Only complete responses are cached. A refused or truncated answer is scored as wrong. A failed judge call or a transient API error (timeout, rate limit, overload) becomes an error row, left out of the metrics and retried on the next run. A bad key or model name stops the run. Without models or a key: `uv run python -m eval.score qa --set p1 --retrieval-only --fake`.
 
 Cost estimates use configurable input and output token rates; the defaults (0.10 and 0.50 per million) are illustrative. Set the selected model's current rates before reporting costs.
 

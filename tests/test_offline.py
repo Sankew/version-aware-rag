@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 import pytest
 
-from eval.score import attributed, bootstrap, kappa, paired_delta, retrieval, wilson
+from eval.score import answered, attributed, bootstrap, kappa, paired_delta, retrieval, wilson
 from eval.validate import check
 from rag import api
 from rag.answer import ABSTAIN, answer, citations, judge, prompt
@@ -112,7 +112,7 @@ def test_llm_cache_and_request_shape(tmp_path):
     assert [p.suffix for p in tmp_path.iterdir()] == [".json"]  # written atomically, no temp files left
 
 
-@pytest.mark.parametrize("stop_reason", ["max_tokens", "refusal"])
+@pytest.mark.parametrize("stop_reason", ["max_tokens", "refusal", "end_turn"])  # end_turn: the JSON is cut short
 def test_incomplete_responses_raise_and_are_not_cached(tmp_path, stop_reason):
     client = FakeClient('{"correct": tr', stop_reason)
     llm = LLM(client, tmp_path)
@@ -131,6 +131,13 @@ def test_versioned_prompt_and_citations():
     assert "<excerpt>\n[employee-handbook:Vacation]" in text and text.count("</excerpt>") == 1
     assert citations("25 days [employee-handbook:Vacation] and [benefits-faq:Time off] [employee-handbook:Vacation].") == [
         ("employee-handbook", "Vacation"), ("benefits-faq", "Time off")]
+
+
+def test_a_refused_or_truncated_answer_is_scored_wrong_with_its_cost(tmp_path):
+    q = {"question": "How many days?", "reference_answer": "25.", "sources": []}
+    excerpt = {"document_id": "employee-handbook", "section": "Vacation", "content": "25 days."}
+    row = answered(LLM(FakeClient("25", "max_tokens"), tmp_path), q, [excerpt], None)
+    assert row["correct"] == 0.0 and row["generation_usd"] > 0 and "max_tokens" in row["answer_error"]
 
 
 def test_answer_keeps_only_retrieved_citations_and_abstains_without_a_call_when_nothing_is_retrieved(tmp_path):

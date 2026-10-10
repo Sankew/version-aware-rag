@@ -79,7 +79,7 @@ def qa(question_set: str, modes: list[str], split: str | None, k: int, retrieval
        reindex: bool = False) -> dict:
     import anthropic
 
-    from rag.models import LLM, Embedder, FakeEmbedder, LLMError
+    from rag.models import LLM, Embedder, FakeEmbedder, LLMError, transient
     embedder = FakeEmbedder() if fake else Embedder()
     conn = store.connect()
     ensure_index(conn, embedder, reindex)
@@ -100,16 +100,11 @@ def qa(question_set: str, modes: list[str], split: str | None, k: int, retrieval
             chunks = retrieve(conn, embedder, q["question"], "aware" if mode == "labelled" else mode, used, k)
             if not retrieval_only:
                 try:
-                    result = answer(llm, q["question"], chunks, used if mode in VERSIONED else None)
-                    verdict = judge(llm, q["question"], q["reference_answer"], result["text"])
-                except (LLMError, anthropic.APIError) as e:  # one bad call doesn't sink the run; it's retried next time
-                    row["error"] = f"{type(e).__name__}: {e}"
-                else:
-                    row |= {"correct": float(verdict["correct"]), "judge_reason": verdict["reason"],
-                            "attributed": attributed(result["text"], q["sources"]) if mode in VERSIONED else None,
-                            "unsupported_citations": len(result["unsupported_citations"]),
-                            "generation_usd": (result["input_tokens"] * PRICE_IN + result["output_tokens"] * PRICE_OUT) / 1e6,
-                            "answer": result["text"]}
+                    row |= answered(llm, q, chunks, used if mode in VERSIONED else None)
+                except (LLMError, anthropic.APIError) as e:
+                    if not (isinstance(e, LLMError) or transient(e)):
+                        raise  # a bad key or model would fail every call the same way
+                    row["error"] = f"{type(e).__name__}: {e}"  # left out of the metrics, retried next run
             row |= retrieval(chunks, q["sources"], gold)
             row["retrieved"] = ";".join(f"{c['document_id']}@v{c['version']}" for c in chunks)
             rows.append(row)
@@ -124,6 +119,25 @@ def qa(question_set: str, modes: list[str], split: str | None, k: int, retrieval
     (RESULTS / f"{question_set}_summary{suffix}.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
     return summary
+
+
+def usd(input_tokens: int, output_tokens: int) -> float:
+    return (input_tokens * PRICE_IN + output_tokens * PRICE_OUT) / 1e6
+
+
+def answered(llm, q: dict, chunks: list[dict], as_of: date | None) -> dict:
+    """Answer and judge one question. A refused or truncated answer is a wrong answer, not a skipped one;
+    only a failed judge call leaves the question out."""
+    from rag.models import LLMError
+    try:
+        result = answer(llm, q["question"], chunks, as_of)
+    except LLMError as e:
+        return {"correct": 0.0, "answer": "", "answer_error": str(e), "generation_usd": usd(e.input_tokens, e.output_tokens)}
+    verdict = judge(llm, q["question"], q["reference_answer"], result["text"])
+    return {"correct": float(verdict["correct"]), "judge_reason": verdict["reason"],
+            "attributed": attributed(result["text"], q["sources"]) if as_of is not None else None,
+            "unsupported_citations": len(result["unsupported_citations"]),
+            "generation_usd": usd(result["input_tokens"], result["output_tokens"]), "answer": result["text"]}
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:

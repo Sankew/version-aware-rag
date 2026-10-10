@@ -75,7 +75,21 @@ class FakeNLI:
 
 
 class LLMError(RuntimeError):
-    """A response that can't be used: refused, cut off at max_tokens, or stopped for another reason."""
+    """A response that can't be used: refused, cut off at max_tokens, stopped for another reason, or not the
+    JSON its schema asked for. Carries the tokens it still cost."""
+
+    def __init__(self, message: str, input_tokens: int = 0, output_tokens: int = 0) -> None:
+        super().__init__(message)
+        self.input_tokens, self.output_tokens = input_tokens, output_tokens
+
+
+def transient(error: Exception) -> bool:
+    """Worth an error row and a retry on the next run: timeouts, rate limits, overload. A 400, 401 or 404
+    means a bad key, model or request, and every call would fail the same way."""
+    import anthropic
+    if isinstance(error, anthropic.APIConnectionError):
+        return True
+    return isinstance(error, anthropic.APIStatusError) and (error.status_code in (408, 409, 429) or error.status_code >= 500)
 
 
 class LLM:
@@ -105,13 +119,20 @@ class LLM:
             return {**json.loads(path.read_text()), "cached": True}
         start = time.perf_counter()
         response = self.client.messages.create(**request)
+        usage = response.usage.input_tokens, response.usage.output_tokens
         if response.stop_reason != "end_turn":
-            raise LLMError(f"{model} stopped with {response.stop_reason}: {getattr(response, 'stop_details', None)}")
+            raise LLMError(f"{model} stopped with {response.stop_reason}: {getattr(response, 'stop_details', None)}", *usage)
+        text = next((b.text for b in response.content if b.type == "text"), "")
+        if schema:
+            try:
+                json.loads(text)
+            except json.JSONDecodeError as e:
+                raise LLMError(f"{model} returned invalid JSON: {e}", *usage) from e
         result = {
-            "text": next((b.text for b in response.content if b.type == "text"), ""),
+            "text": text,
             "model": response.model,
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
+            "input_tokens": usage[0],
+            "output_tokens": usage[1],
             "latency_s": round(time.perf_counter() - start, 3),
         }
         path.parent.mkdir(parents=True, exist_ok=True)
