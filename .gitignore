@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.cache/
+data/
+.env
+.env.*
+.DS_Store
+.mypy_cache/
+.ruff_cache/
+results/*_fake*
