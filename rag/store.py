@@ -125,11 +125,13 @@ def lexical_search(conn: psycopg.Connection, question: str, k: int, mode: str, a
         {"q": question, "k": k, "as_of": as_of}))
 
 
-def chunks_of_current_versions(conn: psycopg.Connection) -> list[dict]:
+def chunks_of_current_versions(conn: psycopg.Connection, on: date | None = None) -> list[dict]:
     """Every chunk of a document version that is in effect now, with its embedding as a numpy array."""
+    on = on or date.today()
     rows = _rows(conn.execute(
         f"""SELECT {COLUMNS}, c.embedding FROM chunks c JOIN doc_versions v ON v.id = c.doc_version_id
-            WHERE v.effective_to IS NULL ORDER BY c.id"""))
+            WHERE v.effective_from <= %(on)s AND (v.effective_to IS NULL OR v.effective_to > %(on)s)
+            ORDER BY c.id""", {"on": on}))
     return [{**r, "embedding": r["embedding"].to_numpy()} for r in rows]
 
 

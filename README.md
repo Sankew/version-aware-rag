@@ -21,7 +21,7 @@ flowchart LR
 
 - **Ingest never deletes.** Each document version is a row in `doc_versions` with its effective date range. Adding a version closes the previous one's range. Versions must arrive in order; v2 after v3 is rejected.
 - **As-of retrieval.** `20 February 2026`, `June 2025` and `in 2024` in a question set the date (a month or a year means its last day). With no date, the date is today. Only 19xx and 20xx count as years, so "for 1200 charge cycles" stays a number. Retrieval filters on the effective date range, never on a `status` flag. Handbook v3 was uploaded on 10 February 2026 but takes effect on 1 March, so a status flag would give the wrong answer for anything asked in between.
-- **Attribution.** Excerpts carry their version and effective dates, and answers name the version they used. Citations that don't match a retrieved excerpt are dropped and counted.
+- **Attribution.** Excerpts carry their version and effective dates, and answers name the version they used. Citations that don't match a retrieved excerpt are removed from the answer text and counted. This checks citation membership; it does not prove that a cited fact is supported.
 - **Change log.** `uv run python versioning.py changelog employee-handbook` aligns sections by heading and diffs them with `difflib`.
 - **Contradictions.**
   - Chunks from different current documents with cosine similarity above a threshold are candidates.

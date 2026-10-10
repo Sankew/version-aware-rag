@@ -75,3 +75,11 @@ def test_lexical_search_uses_the_as_of_versions(conn):
                                       "O'Brien & co | !(x) <-> y:*", "carry-over"])
 def test_lexical_search_accepts_any_text(conn, question):
     retrieve(conn, FakeEmbedder(), question, "lexical", date(2026, 10, 1), k=5)
+
+
+def test_contradictions_use_versions_effective_on_the_requested_date(conn):
+    before = store.chunks_of_current_versions(conn, date(2026, 2, 20))
+    after = store.chunks_of_current_versions(conn, date(2026, 3, 1))
+    assert versions_for(before, "employee-handbook") == {2}
+    assert versions_for(after, "employee-handbook") == {3}
+    assert store.chunks_of_current_versions(conn, date(2023, 1, 1)) == []

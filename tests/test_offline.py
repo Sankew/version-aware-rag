@@ -146,6 +146,7 @@ def test_answer_keeps_only_retrieved_citations_and_abstains_without_a_call_when_
     result = answer(LLM(client, tmp_path), "How many days?", [excerpt])
     assert result["citations"] == [("employee-handbook", "Vacation")]
     assert result["unsupported_citations"] == [("made-up", "Page")]
+    assert "[made-up:Page]" not in result["text"] and "[employee-handbook:Vacation]" in result["text"]
     empty = answer(LLM(client, tmp_path), "How many days?", [])
     assert empty["text"] == ABSTAIN and len(client.calls) == 1
 
@@ -237,3 +238,22 @@ def test_api_validates_answers_and_maps_model_failures(monkeypatch):
         assert client.post("/ask", json={"question": "x", "mode": "bogus"}).status_code == 422
     finally:
         api.app.dependency_overrides.clear()
+
+
+def test_labelsheet_preserves_hand_marks(tmp_path, monkeypatch):
+    import eval.score as scoring
+    monkeypatch.setattr(scoring, "RESULTS", tmp_path)
+    run = tmp_path / "p1_aware.csv"
+    run.write_text("id,question,reference_answer,answer,correct\na,Q,25,25,1\n")
+    sheet = tmp_path / "labels" / "p1_aware_sheet.csv"
+    sheet.parent.mkdir()
+    sheet.write_text("id,human_correct\na,1\n")
+    with pytest.raises(SystemExit, match="already has hand marks"):
+        scoring.labelsheet(run, 1, 0)
+
+
+def test_real_model_client_requires_explicit_model_ids(monkeypatch):
+    monkeypatch.delenv("GENERATOR_MODEL", raising=False)
+    monkeypatch.delenv("JUDGE_MODEL", raising=False)
+    with pytest.raises(ValueError, match="GENERATOR_MODEL"):
+        LLM()

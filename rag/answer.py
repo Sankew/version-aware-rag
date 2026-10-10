@@ -51,7 +51,9 @@ def answer(llm: LLM, question: str, chunks: list[dict], as_of=None) -> dict:
     result = llm.complete(GENERATOR, system, prompt(question, chunks, as_of), effort="low", max_tokens=8192)
     cited = citations(result["text"])
     retrieved = {(c["document_id"], c["section"]) for c in chunks}
-    return {**result, "citations": [c for c in cited if c in retrieved],
+    text = re.sub(r"\[([a-z0-9-]+):([^\]]+)\]",
+                  lambda m: m.group(0) if (m[1], m[2].strip()) in retrieved else "", result["text"])
+    return {**result, "text": text, "citations": [c for c in cited if c in retrieved],
             "unsupported_citations": [c for c in cited if c not in retrieved]}
 
 

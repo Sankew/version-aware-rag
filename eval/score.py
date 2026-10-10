@@ -251,6 +251,8 @@ def labelsheet(run: Path, n: int, seed: int) -> Path:
     sample = random.Random(seed).sample(rows, min(n, len(rows)))
     out = RESULTS / "labels" / f"{run.stem}_sheet.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists() and any(r.get("human_correct", "").strip() for r in csv.DictReader(out.open(encoding="utf-8"))):
+        raise SystemExit(f"{out} already has hand marks; move it aside before sampling again")
     with out.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["run", "id", "question", "reference_answer", "answer", "human_correct"])
@@ -298,7 +300,7 @@ def contradictions(threshold: float, nli_threshold: float, fake: bool, reindex: 
     embedder, nli = (FakeEmbedder(), FakeNLI()) if fake else (Embedder(), NLI())
     conn = store.connect()
     ensure_index(conn, embedder, reindex)
-    chunks = store.chunks_of_current_versions(conn)
+    chunks = store.chunks_of_current_versions(conn, AS_OF_TODAY)
     labels = [json.loads(line) for line in (ROOT / "eval" / "contradictions.jsonl").read_text(encoding="utf-8").splitlines()]
     sweep = {}
     for t in (0.5, 0.6, 0.7, 0.8, 0.9):
