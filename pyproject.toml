@@ -1,0 +1,18 @@
+[project]
+name = "version-aware-rag"
+version = "0.1.0"
+description = "Version-aware RAG: as-of retrieval over versioned documents, change logs and contradiction detection"
+requires-python = ">=3.12,<3.13"
+dependencies = ["anthropic", "fastapi", "uvicorn", "numpy", "pgvector", "psycopg[binary,pool]", "pypdf"]
+
+[dependency-groups]
+models = ["sentence-transformers"]
+dev = ["pytest", "httpx2"]
+corpus = ["fpdf2"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

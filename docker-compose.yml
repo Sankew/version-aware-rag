@@ -1,0 +1,13 @@
+# Postgres + pgvector. The API and models run natively (MPS on Apple silicon); see README.
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: rag
+    ports:
+      - "127.0.0.1:5432:5432"  # local only: the password is a placeholder
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 30
