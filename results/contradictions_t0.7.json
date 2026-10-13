@@ -1,0 +1,62 @@
+{
+  "candidate_threshold": 0.7,
+  "nli_threshold": 0.5,
+  "candidate_pairs": 145,
+  "sweep": {
+    "0.5": {
+      "candidate_pairs": 4204,
+      "candidate_recall": 1.0
+    },
+    "0.6": {
+      "candidate_pairs": 1062,
+      "candidate_recall": 1.0
+    },
+    "0.7": {
+      "candidate_pairs": 145,
+      "candidate_recall": 0.8333333333333334
+    },
+    "0.8": {
+      "candidate_pairs": 16,
+      "candidate_recall": 0.3333333333333333
+    },
+    "0.9": {
+      "candidate_pairs": 1,
+      "candidate_recall": 0.08333333333333333
+    }
+  },
+  "labelled_contradictions": 12,
+  "labelled_consistent": 9,
+  "candidate_recall": 0.8333333333333334,
+  "nli_recall": 1.0,
+  "end_to_end_recall": 0.8333333333333334,
+  "precision_on_labelled": 0.7142857142857143,
+  "false_positives_on_hard_negatives": 4,
+  "flagged_unlabelled_pairs": 96,
+  "by_kind": {
+    "consistent/numeric": {
+      "labelled": 5,
+      "surfaced": 5,
+      "flagged": 2
+    },
+    "consistent/policy": {
+      "labelled": 1,
+      "surfaced": 0,
+      "flagged": 0
+    },
+    "consistent/scope": {
+      "labelled": 3,
+      "surfaced": 2,
+      "flagged": 2
+    },
+    "contradiction/numeric": {
+      "labelled": 8,
+      "surfaced": 8,
+      "flagged": 8
+    },
+    "contradiction/policy": {
+      "labelled": 4,
+      "surfaced": 2,
+      "flagged": 2
+    }
+  }
+}

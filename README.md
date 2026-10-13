@@ -6,7 +6,7 @@ Company policies change. An answer about today's vacation allowance and an answe
 
 It also produces section-by-section change logs and checks for contradictions between documents that are still in effect. The corpus belongs to a fictional company, Brackwater Robotics, which reduces the chance of answering from prior knowledge. It does not prevent a model from guessing.
 
-**Status:** the implementation, data validation and automated tests pass CI. Evaluation with real embeddings, NLI and generation models is pending. The deterministic substitutes used in CI check the pipeline; they do not establish answer quality or model performance.
+**Status:** the implementation, data validation and automated tests pass CI. Retrieval and contradiction detection have been evaluated with the real embedding and NLI models (see [Results](#results)). Answer generation and judging have not been run, so answer quality, version attribution and cost are still unmeasured.
 
 ## How it works
 
@@ -121,6 +121,29 @@ uv run --locked python -m eval.score agreement results/labels/p1_aware_k5_sheet.
 The sample contains up to 50 answers. Agreement and Cohen's kappa compare the completed sheet with the judge's verdicts. Sampling refuses to overwrite a sheet that already has review marks.
 
 QA runs write per-mode CSV files and a summary JSON file in `results/`. Contradiction runs write a report and the flagged pairs. Fake runs have `_fake` in their filenames and are excluded from version control.
+
+### Results
+
+Measured on 2026-10-13 with `BAAI/bge-small-en-v1.5` embeddings, exact pgvector search (top 5) and `cross-encoder/nli-deberta-v3-base`. No generation model was called. Raw outputs: `results/*_k5_retrieval.*` and `results/contradictions_t0.7.json`.
+
+**Version retrieval** (`eval/p1.jsonl`, 63 questions with a source). Top-1 counts questions whose highest-ranked chunk comes from the correct document *version*. Stale fraction is the share of retrieved chunks from versions that were not in effect on the question's date.
+
+| Mode | Top-1, all | Top-1, historical | Top-1, changed now | Stale fraction |
+|---|---|---|---|---|
+| `all` | 33/63 (0.40–0.64) | 13/24 | 19/33 | 0.49 |
+| `current` | 39/63 (0.50–0.73) | **2/24** | 31/33 | 0.28 |
+| `aware` | **60/63** (0.87–0.98) | **23/24** | 31/33 | **0.00** |
+| `lexical` | 51/63 (0.70–0.89) | 19/24 | 27/33 | 0.00 |
+
+Ranges are 95% Wilson intervals.
+
+Keeping only the latest version, the usual fix for stale documents, fails exactly where it should: the right version came first for 2 of the 24 historical questions. Filtering by the question's date put it first for 60 of 63 and retrieved nothing out of date.
+
+Searching every version looks fine on hit rate alone (the right version was in the top five for all 63) but about half of what it retrieved was out of date. Date extraction read all 67 questions correctly, so `labelled` scored the same as `aware`.
+
+**Baseline questions** (`eval/step0.jsonl`, 85 answerable). With the date filter, dense retrieval had a source in the top five for 82/85 (top-1 71); Postgres full-text search for 84/85 (top-1 75). The gap is within noise (paired bootstrap +0.024, 95% interval 0.000 to 0.059), and the synthetic questions share wording with the documents, which favours full-text search. Date extraction misread 1 of 97: "Which office opened in 2025?" was treated as a question about 2025.
+
+**Contradictions** (12 planted, 9 consistent pairs). At cosine similarity 0.7 the candidate filter kept 145 chunk pairs and surfaced 10 of the 12 contradictions; NLI flagged all 10. Of the flagged labelled pairs, 10 of 14 were real contradictions; the other 4 were consistent pairs. All 8 numeric contradictions were caught; 2 of 4 policy contradictions were never surfaced as candidates. NLI also flagged 96 unlabelled pairs that nobody has reviewed. At 0.6 the filter surfaces all 12 but keeps 1,062 pairs.
 
 ## Checks without model calls
 
