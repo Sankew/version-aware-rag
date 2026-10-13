@@ -91,6 +91,8 @@ def transient(error: Exception) -> bool:
     if isinstance(error, anthropic.APIConnectionError):
         return True
     if isinstance(error, gemini_errors.APIError):
+        if error.code == 429 and "PerDay" in str(error):
+            return False  # a daily quota: every call fails until it resets, so stop and rerun later from the cache
         return error.code in (408, 409, 429) or error.code >= 500
     return isinstance(error, anthropic.APIStatusError) and (error.status_code in (408, 409, 429) or error.status_code >= 500)
 

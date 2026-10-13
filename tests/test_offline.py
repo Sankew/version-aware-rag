@@ -299,5 +299,7 @@ def test_gemini_incomplete_responses_raise_with_their_cost_and_are_not_cached(tm
 
 def test_gemini_rate_limits_are_transient_and_bad_requests_are_not():
     assert transient(gemini_errors.ClientError(429, {"error": {"message": "quota"}}))
+    daily = {"error": {"message": "quota", "details": [{"violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}
+    assert not transient(gemini_errors.ClientError(429, daily))
     assert transient(gemini_errors.ServerError(503, {"error": {"message": "overloaded"}}))
     assert not transient(gemini_errors.ClientError(400, {"error": {"message": "unknown model"}}))
