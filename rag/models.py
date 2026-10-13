@@ -87,56 +87,88 @@ def transient(error: Exception) -> bool:
     """Worth an error row and a retry on the next run: timeouts, rate limits, overload. A 400, 401 or 404
     means a bad key, model or request, and every call would fail the same way."""
     import anthropic
+    from google.genai import errors as gemini_errors
     if isinstance(error, anthropic.APIConnectionError):
         return True
+    if isinstance(error, gemini_errors.APIError):
+        return error.code in (408, 409, 429) or error.code >= 500
     return isinstance(error, anthropic.APIStatusError) and (error.status_code in (408, 409, 429) or error.status_code >= 500)
 
 
 class LLM:
     """Model calls cached on disk by a hash of the full request, so reruns are free and repeatable.
 
-    Sampling parameters use the configured models' defaults. Only complete
-    responses (stop_reason end_turn) are cached; anything else raises LLMError and is retried next run.
+    Model IDs starting with "gemini" go to the Gemini API (GEMINI_API_KEY), all others to the Anthropic API.
+    Sampling parameters use the configured models' defaults; `effort` is Anthropic's effort setting or
+    Gemini's thinking level. Only complete responses (stop_reason end_turn, finish_reason STOP) are cached;
+    anything else raises LLMError and is retried next run.
     """
 
-    def __init__(self, client=None, cache_dir: Path = ROOT / ".cache" / "llm") -> None:
-        if client is None:
+    def __init__(self, client=None, cache_dir: Path = ROOT / ".cache" / "llm", gemini=None) -> None:
+        if client is None and gemini is None:
             if not all(os.environ.get(name, "").strip() for name in ("GENERATOR_MODEL", "JUDGE_MODEL")):
                 raise ValueError("Set GENERATOR_MODEL and JUDGE_MODEL before making real model calls")
-            import anthropic
-            client = anthropic.Anthropic(timeout=600.0, max_retries=2)  # judge calls can run for minutes
-        self.client, self.cache_dir = client, cache_dir
+        self.client, self.gemini, self.cache_dir = client, gemini, cache_dir  # created on first use
 
     def complete(self, model: str, system: str, prompt: str, effort: str, max_tokens: int,
                  schema: dict | None = None) -> dict:
-        output_config: dict = {"effort": effort}
-        if schema:
-            output_config["format"] = {"type": "json_schema", "schema": schema}
-        request = {"model": model, "max_tokens": max_tokens, "system": system,
-                   "messages": [{"role": "user", "content": prompt}], "output_config": output_config}
+        if model.startswith("gemini"):
+            request = {"provider": "gemini", "model": model, "max_tokens": max_tokens, "system": system,
+                       "prompt": prompt, "effort": effort, "schema": schema}
+        else:
+            output_config: dict = {"effort": effort}
+            if schema:
+                output_config["format"] = {"type": "json_schema", "schema": schema}
+            request = {"model": model, "max_tokens": max_tokens, "system": system,
+                       "messages": [{"role": "user", "content": prompt}], "output_config": output_config}
         path = self.cache_dir / f"{hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()}.json"
         if path.exists():
             return {**json.loads(path.read_text()), "cached": True}
         start = time.perf_counter()
-        response = self.client.messages.create(**request)
-        usage = response.usage.input_tokens, response.usage.output_tokens
-        if response.stop_reason != "end_turn":
-            raise LLMError(f"{model} stopped with {response.stop_reason}: {getattr(response, 'stop_details', None)}", *usage)
-        text = next((b.text for b in response.content if b.type == "text"), "")
+        result = self._gemini(request) if "provider" in request else self._anthropic(request)
         if schema:
             try:
-                json.loads(text)
+                json.loads(result["text"])
             except json.JSONDecodeError as e:
-                raise LLMError(f"{model} returned invalid JSON: {e}", *usage) from e
-        result = {
-            "text": text,
-            "model": response.model,
-            "input_tokens": usage[0],
-            "output_tokens": usage[1],
-            "latency_s": round(time.perf_counter() - start, 3),
-        }
+                raise LLMError(f"{model} returned invalid JSON: {e}", result["input_tokens"], result["output_tokens"]) from e
+        result["latency_s"] = round(time.perf_counter() - start, 3)
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", dir=path.parent, suffix=".tmp", delete=False) as f:
             f.write(json.dumps(result))
         os.replace(f.name, path)  # atomic: an interrupted run never leaves a half-written entry
         return {**result, "cached": False}
+
+    def _anthropic(self, request: dict) -> dict:
+        if self.client is None:
+            import anthropic
+            self.client = anthropic.Anthropic(timeout=600.0, max_retries=2)  # judge calls can run for minutes
+        response = self.client.messages.create(**request)
+        usage = response.usage.input_tokens, response.usage.output_tokens
+        if response.stop_reason != "end_turn":
+            raise LLMError(f"{request['model']} stopped with {response.stop_reason}: "
+                           f"{getattr(response, 'stop_details', None)}", *usage)
+        return {"text": next((b.text for b in response.content if b.type == "text"), ""), "model": response.model,
+                "input_tokens": usage[0], "output_tokens": usage[1]}
+
+    def _gemini(self, request: dict) -> dict:
+        from google.genai import types
+        if self.gemini is None:
+            from google import genai
+            retry = types.HttpRetryOptions(attempts=6, initial_delay=2.0, max_delay=60.0,
+                                           http_status_codes=[408, 429, 500, 502, 503, 504])
+            self.gemini = genai.Client(http_options=types.HttpOptions(timeout=600_000, retry_options=retry))
+        config = types.GenerateContentConfig(
+            system_instruction=request["system"], max_output_tokens=request["max_tokens"],
+            thinking_config=types.ThinkingConfig(thinking_level=request["effort"].upper()),
+            **({"response_mime_type": "application/json", "response_json_schema": request["schema"]}
+               if request["schema"] else {}))
+        response = self.gemini.models.generate_content(model=request["model"], contents=request["prompt"], config=config)
+        meta = response.usage_metadata
+        # Thinking tokens are billed as output.
+        usage = (meta.prompt_token_count or 0, (meta.candidates_token_count or 0) + (meta.thoughts_token_count or 0))
+        candidate = response.candidates[0] if response.candidates else None
+        if candidate is None or candidate.finish_reason != types.FinishReason.STOP:
+            reason = candidate.finish_reason if candidate else getattr(response.prompt_feedback, "block_reason", None)
+            raise LLMError(f"{request['model']} stopped with {reason}", *usage)
+        return {"text": response.text or "", "model": response.model_version or request["model"],
+                "input_tokens": usage[0], "output_tokens": usage[1]}

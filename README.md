@@ -42,7 +42,7 @@ export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/version_rag"
 
 Create `version_rag` once. The Compose service binds to local port 5432. If another project already runs pgvector on that port, reuse that server and create this project's separate database there.
 
-Real answer generation and judging use the Anthropic SDK. Set an API key and actual model IDs that support the request's effort settings and structured JSON output. Replace the placeholders before running the evaluation:
+Real answer generation and judging use the Anthropic SDK, or the Gemini API for model IDs that start with `gemini` (set `GEMINI_API_KEY` instead; effort becomes Gemini's thinking level). Set an API key and actual model IDs that support the request's effort settings and structured JSON output. Replace the placeholders before running the evaluation:
 
 ```bash
 export ANTHROPIC_API_KEY="your-api-key"

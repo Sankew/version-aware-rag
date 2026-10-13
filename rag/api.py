@@ -7,6 +7,7 @@ from typing import Literal
 
 import anthropic
 import psycopg
+from google.genai import errors as gemini_errors
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pgvector.psycopg import register_vector
@@ -92,6 +93,7 @@ def search(svc: Services, question: str, mode: str, as_of: date) -> list[dict]:
 
 @app.exception_handler(LLMError)
 @app.exception_handler(anthropic.APIError)
+@app.exception_handler(gemini_errors.APIError)
 async def model_failed(request: Request, exc: Exception) -> JSONResponse:
     log.error("model call failed: %s", exc, exc_info=exc)
     return JSONResponse({"detail": "the language model failed to answer"}, status_code=502)

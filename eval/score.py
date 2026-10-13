@@ -78,6 +78,7 @@ def attributed(text: str, sources: list[dict]) -> float | None:
 def qa(question_set: str, modes: list[str], split: str | None, k: int, retrieval_only: bool, fake: bool,
        reindex: bool = False) -> dict:
     import anthropic
+    from google.genai import errors as gemini_errors
 
     from rag.models import LLM, Embedder, FakeEmbedder, LLMError, transient
     embedder = FakeEmbedder() if fake else Embedder()
@@ -101,7 +102,7 @@ def qa(question_set: str, modes: list[str], split: str | None, k: int, retrieval
             if not retrieval_only:
                 try:
                     row |= answered(llm, q, chunks, used if mode in VERSIONED else None)
-                except (LLMError, anthropic.APIError) as e:
+                except (LLMError, anthropic.APIError, gemini_errors.APIError) as e:
                     if not (isinstance(e, LLMError) or transient(e)):
                         raise  # a bad key or model would fail every call the same way
                     row["error"] = f"{type(e).__name__}: {e}"  # left out of the metrics, retried next run

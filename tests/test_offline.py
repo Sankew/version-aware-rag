@@ -5,13 +5,15 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 import pytest
+from google.genai import errors as gemini_errors
+from google.genai import types as gemini_types
 
 from eval.score import answered, attributed, bootstrap, kappa, paired_delta, retrieval, wilson
 from eval.validate import check
 from rag import api
 from rag.answer import ABSTAIN, answer, citations, judge, prompt
 from rag.ingest import ROOT, Section, chunk, manifest, parse
-from rag.models import LLM, FakeEmbedder, LLMError
+from rag.models import LLM, FakeEmbedder, LLMError, transient
 from versioning import changelog, evaluate_contradictions, parse_as_of, sentences
 
 
@@ -257,3 +259,45 @@ def test_real_model_client_requires_explicit_model_ids(monkeypatch):
     monkeypatch.delenv("JUDGE_MODEL", raising=False)
     with pytest.raises(ValueError, match="GENERATOR_MODEL"):
         LLM()
+
+
+class FakeGemini:
+    """Stands in for google.genai.Client: answers every call with `text` and the given finish reason."""
+
+    def __init__(self, text: str, finish: str = "STOP") -> None:
+        self.text, self.finish, self.calls = text, finish, []
+        self.models = self
+
+    def generate_content(self, model, contents, config):
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        return SimpleNamespace(
+            candidates=[SimpleNamespace(finish_reason=gemini_types.FinishReason[self.finish])], text=self.text,
+            usage_metadata=SimpleNamespace(prompt_token_count=100, candidates_token_count=20, thoughts_token_count=30),
+            model_version=f"{model}-001", prompt_feedback=None)
+
+
+def test_gemini_models_get_a_json_schema_and_thinking_level_and_thinking_counts_as_output(tmp_path):
+    gemini = FakeGemini(json.dumps({"correct": True, "reason": "same"}))
+    schema = {"type": "object", "properties": {"correct": {"type": "boolean"}}}
+    llm = LLM(cache_dir=tmp_path, gemini=gemini)
+    result = llm.complete("gemini-test-pro", "Grade it.", "Q?", effort="high", max_tokens=16000, schema=schema)
+    config = gemini.calls[0]["config"]
+    assert config.system_instruction == "Grade it." and config.max_output_tokens == 16000
+    assert config.thinking_config.thinking_level == gemini_types.ThinkingLevel.HIGH and config.temperature is None
+    assert config.response_mime_type == "application/json" and config.response_json_schema == schema
+    assert result["input_tokens"] == 100 and result["output_tokens"] == 50
+    assert llm.complete("gemini-test-pro", "Grade it.", "Q?", effort="high", max_tokens=16000, schema=schema)["cached"]
+
+
+@pytest.mark.parametrize("finish", ["MAX_TOKENS", "SAFETY"])
+def test_gemini_incomplete_responses_raise_with_their_cost_and_are_not_cached(tmp_path, finish):
+    llm = LLM(cache_dir=tmp_path, gemini=FakeGemini("partial", finish))
+    with pytest.raises(LLMError) as raised:
+        llm.complete("gemini-test-flash", "s", "p", effort="low", max_tokens=10)
+    assert raised.value.output_tokens == 50 and not list(tmp_path.iterdir())
+
+
+def test_gemini_rate_limits_are_transient_and_bad_requests_are_not():
+    assert transient(gemini_errors.ClientError(429, {"error": {"message": "quota"}}))
+    assert transient(gemini_errors.ServerError(503, {"error": {"message": "overloaded"}}))
+    assert not transient(gemini_errors.ClientError(400, {"error": {"message": "unknown model"}}))
